@@ -1,0 +1,4 @@
+test/output/*.o
+test/output/*.elf
+__pycache__/
+*.pyc
