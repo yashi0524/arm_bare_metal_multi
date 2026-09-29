@@ -10,7 +10,7 @@ Or import from your own script:
     from Iris_connect import model, cpu0, cpu1
 
 `synchronous=True` is required for cpu0.step()/cpu1.step() (single-
-instruction stepping) to exist at all — see ../doc/README.md.
+instruction stepping) to exist at all — see ../README.md.
 """
 import os
 import sys

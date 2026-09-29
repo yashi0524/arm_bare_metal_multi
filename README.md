@@ -3,10 +3,10 @@
 Bare-metal AArch64 test that brings up a second CPU core for real, via a
 genuine PSCI `CPU_ON` handshake (SMC64 function ID `0xC4000003`) — not a
 shortcut like a raw `WFE`/`SEV` spin-table. Sibling of
-[`../../bare_metal`](../../bare_metal) (single-core smoke test); same build
+[`../bare_metal`](../bare_metal) (single-core smoke test); same build
 recipe, same two FVPs.
 
-See `../src/test.s`'s header comment for the full design rationale and the
+See `src/test.s`'s header comment for the full design rationale and the
 empirical findings that shaped it (cpu1 boots powered off by default on
 Base Platform RevC, its reset vector defaults to `0x0` independent of
 cpu0's, and the power controller only responds to a genuine CPU-issued
@@ -25,7 +25,7 @@ store, not Iris's debug memory-write backdoor).
    `0x1c100000`; `PPONR` at `+0x4`), and `ERET`s back to `cpu0`.
 4. `cpu1`, once powered on, starts fetching from its fixed reset vector
    (`cluster0.cpu1.RVBAR`, set at launch — see `SECONDARY_RVBAR` in
-   `../Makefile`), reads the now-already-written mailbox, and branches
+   `Makefile`), reads the now-already-written mailbox, and branches
    straight to `secondary_task`. No polling loop needed — the mailbox is
    written *before* the core is powered on.
 5. Each core prints a distinct semihosting message once it's running.
@@ -33,7 +33,6 @@ store, not Iris's debug memory-write backdoor).
 ## Usage
 
 ```bash
-cd ../..   # arm_bare_metal_multi/
 source script/0_env_var_setup.sh   # puts both FVPs + ipython3 on PATH
 make                                 # assembles src/test.s -> test/output/test.elf
 ```
@@ -72,7 +71,7 @@ PRIMARY CORE (cpu0) BOOTED, RELEASED SECONDARY VIA PSCI CPU_ON
 This is expected on this platform, not a bug: Foundation Platform has no
 Iris and no power controller, and its `cpu1` auto-boots to the same `-a`
 entry point reading the same `MPIDR_EL1` Aff1 value as `cpu0` (verified —
-see `../src/test.s`'s header), so *both* cores run the primary path
+see `src/test.s`'s header), so *both* cores run the primary path
 independently. Use `run` only as a quick sanity check that `cpu0`'s own
 EL3/SMC code assembles and runs without faulting — not as evidence the
 PSCI handshake itself works; that's what `run-base` demonstrates.
@@ -90,7 +89,7 @@ ipython3 -i script/Iris_connect.py
 This connects, halts both cores, and leaves `model`/`cpu0`/`cpu1` live in
 your `ipython3` session (see `script/Iris_connect.py`). For the debug
 options landscape and the full Iris API, see
-[`how_to_debug.md`](how_to_debug.md).
+[`doc/how_to_debug.md`](doc/how_to_debug.md).
 
 Useful things to catch live:
 - A breakpoint on `smc_handler` (`cpu0.add_bpt_prog(<address>)`) — halts
@@ -102,5 +101,5 @@ Useful things to catch live:
   was set to until the handler's `PPONR` write actually powers it on; only
   then does it start advancing.
 
-Get exact addresses via `aarch64-linux-gnu-nm ../test/output/test.elf`
+Get exact addresses via `aarch64-linux-gnu-nm test/output/test.elf`
 (e.g. `smc_handler`, `mailbox`, `secondary_task`).

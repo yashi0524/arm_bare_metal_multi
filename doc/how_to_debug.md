@@ -18,7 +18,7 @@ What's actually available for debugging on this host, and why the raw
 Arm doesn't publish a consolidated Iris debug API reference — the
 `iris.debug` module's own docstrings are the only real documentation.
 Everything below was verified hands-on against a running FVP as part of
-this project (see `README.md`), not copied from an official cheat sheet
+this project (see `../README.md`), not copied from an official cheat sheet
 (none exists).
 
 ### Connecting
