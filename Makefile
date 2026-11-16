@@ -3,8 +3,8 @@
 # (cpu0-only sanity check, no debug interface) or Base Platform RevC
 # (FVP_Base_RevC-2xAEMvA; run-base-debug additionally starts an Iris server
 # so the real PSCI CPU_ON handshake can be caught live with a breakpoint/
-# watchpoint — see src/test.s's header and arm_test_env.md's Iris section
-# for the debug API).
+# watchpoint — see src/test.s's header and doc/how_to_debug.md for the
+# debug API).
 # `source script/0_env_var_setup.sh` first to put both FVPs (and ipython3) on PATH.
 # Sibling of ../bare_metal (single-core smoke test) — same build recipe,
 # same two FVPs, this one brings up a second core for real via PSCI instead.
@@ -72,11 +72,12 @@ run-base: $(TARGET)
 
 # --- Run under Base Platform RevC, with Iris debug server ---
 # Same as run-base, plus -I to start the Iris server so a debug client
-# (e.g. ipython3 + iris.debug, see arm_test_env.md) can attach and watch
-# the PSCI CPU_ON handshake live — e.g. a breakpoint on smc_handler, or a
-# memory watchpoint (add_bpt_mem) on the PPONR write or the mailbox store.
-# The model starts running immediately (no -R), so halt cpu0 right after
-# connecting if you need to catch this from the very first instruction.
+# (e.g. ipython3 + iris.debug, see doc/how_to_debug.md) can attach and
+# watch the PSCI CPU_ON handshake live — e.g. a breakpoint on smc_handler,
+# or a memory watchpoint (add_bpt_mem) on the PPONR write or the mailbox
+# store. Verified: with -I and no -R, the model does NOT run on its own —
+# it just sits listening until a client actively drives it (step_all()/
+# cpu.step(), or resume_all() — see how_to_debug.md's caveat on that).
 run-base-debug: $(TARGET)
 	FVP_Base_RevC-2xAEMvA -a $(TARGET) \
 	  -C bp.secure_memory=0 \
@@ -86,7 +87,25 @@ run-base-debug: $(TARGET)
 	  -C cluster0.cpu1.RVBAR=$(SECONDARY_RVBAR) \
 	  -I --iris-port 7100
 
+# --- Run under Base Platform RevC, with a deliberately reproduced boot
+#     failure, Iris server on ---
+# For live-debugging practice: identical to run-base-debug except cpu1's
+# RVBAR is left at its power-on-reset default instead of being pointed at
+# secondary_entry. cpu0 still boots and prints its message normally —
+# the failure is isolated to the secondary core only, same as it would be
+# on real hardware if boot firmware forgot to program a core's reset
+# vector before releasing it. Same caveat as run-base-debug above: nothing
+# progresses until a client connects and drives it. See
+# doc/boot_fail_practice.md.
+run-base-bug: $(TARGET)
+	FVP_Base_RevC-2xAEMvA -a $(TARGET) \
+	  -C bp.secure_memory=0 \
+	  -C bp.pl011_uart0.out_file=- \
+	  -C cluster0.has_arm_v9-0=1 -C cluster0.has_sve=1 \
+	  -C cluster1.has_arm_v9-0=1 -C cluster1.has_sve=1 \
+	  -I --iris-port 7100
+
 clean:
 	rm -f $(OBJ) $(TARGET)
 
-.PHONY: all run run-base run-base-debug clean
+.PHONY: all run run-base run-base-debug run-base-bug clean
