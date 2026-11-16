@@ -61,7 +61,7 @@ shell, to stop that too.
 |---|---|
 | `cpu.set_execution_state(False)` / `(True)` | halt / resume flag — **real bool**, not `"stop"`/`"run"`. **On a synchronous connection this does NOT make execution progress** — verified: PC stayed frozen for 1.5 real seconds with the flag reporting `True` the whole time. `SyncTarget` has no free-run RPC at all; only `step()` advances it |
 | `cpu.get_execution_state()` | returns bool (just the flag above, not "is it actually moving") |
-| `cpu.step(count=1, unit='instruction')` | single/multi-step — sync model only, and the *only* real way to advance a synchronous target. A large `count` works fine as a practical "run" — e.g. `cpu.step(count=100000)` drove an entire PSCI CPU_ON handshake to completion in one call in this project |
+| `cpu.step(count=1, unit='instruction')` | single/multi-step — sync model only, and the *only* real way to advance a synchronous target. A large `count` works fine as a practical "run" — e.g. `cpu.step(count=100000)` drove an entire PSCI CPU_ON handshake to completion in one call in this project. **A hit breakpoint stops it early** — verified: `cpu0.step(count=1000)` with `add_bpt_prog(smc_handler)` set returned with PC exactly on `smc_handler`, so step-with-big-count + breakpoint is the GDB `continue` equivalent |
 | `cpu.get_pc()` | current PC |
 | `cpu.get_instruction_count()` | retired-instruction counter (per-target, not cumulative from reset) |
 | `resume_all()` / `halt_all()` / `step_all()` (from `../script/Iris_connect.py`) | one call each to set/step every core at once — no bulk primitive exists in the Iris API itself; these just loop `(cpu0, cpu1)` for you. **Use `step_all()` to actually make progress** — `resume_all()` alone only sets the flag, per the caveat above |
@@ -80,7 +80,7 @@ Quick summary, since the distinction above is easy to miss:
 | `cpu.read_register(name)` | e.g. `"X1"`, `"PC"`, `"MPIDR_EL1"`, `"SCR_EL3"` |
 | `cpu.write_register(name, value)` | |
 | `cpu.read_all_registers()` | dict of everything |
-| `cpu.has_register(name)` | check before reading something arch-conditional |
+| `cpu.has_register(name)` | check before reading something arch-conditional — e.g. `has_register("CurrentEL")` returns `False` on this FVP; look in `read_all_registers()` for the PSTATE/CPSR-style register instead (not yet verified which one carries EL) |
 
 ### Memory
 
@@ -112,6 +112,38 @@ fails on a peripheral address, that's why.
 | `cpu.add_bpt_reg(name, on_read=True, on_write=True)` | register watchpoint — Arm's own docstring says "no Arm models support this as of 2013," untested here |
 | `cpu.remove_bpt(bpt.number)` | **note the `.number`** — passing the `Breakpoint` object itself raises `ValueError` |
 | `cpu.get_hit_breakpoints()` | generator, valid after a run stops |
+
+### Print debugging
+
+Two different output channels — easy to look in the wrong terminal:
+
+| Output | Appears in |
+|---|---|
+| Target-side semihosting (`hlt #0xf000` / `SYS_WRITE0` in `../src/test.s`) | The FVP's own stdout — the terminal running `make run-base-debug` (terminal 1). **Never** in `ipython3` |
+| Host-side probes (`hex(cpu.get_pc())`, `read_register()`, `dump_mem()`, `print()`) | Your `ipython3` session (terminal 2) |
+
+Semihosting text appears **exactly when the `hlt` instruction is
+stepped** — verified: "PRIMARY…" was absent from the FVP log while `cpu0`
+sat on the `smc_handler` breakpoint, and appeared only once `cpu0` was
+single-stepped onward to `primary_loop`. So `cpu.step(1)` pins each
+message to the instruction that emitted it, and a message that never
+appears means that core never reached its `hlt`.
+
+A verified sequence combining both:
+
+```python
+b = cpu0.add_bpt_prog(0x80000c00)            # smc_handler (from nm)
+cpu0.step(count=1000)                        # stops at the breakpoint
+[h.number for h in cpu0.get_hit_breakpoints()]   # [0]
+[hex(cpu0.read_register(r)) for r in ("X0", "X1", "X2")]
+# ['0xc4000003', '0x81000100', '0x8000100c'] = CPU_ON, cpu1 affinity, secondary_task
+cpu0.remove_bpt(b.number)
+dump_mem(cpu0, 0x80001020, 8)                # mailbox: zeros before handler runs
+# step cpu0 on past the str -> mailbox reads 0c 10 00 80 ...; past the hlt -> "PRIMARY..." in terminal 1
+```
+
+Addresses above are from the current build — re-check with
+`aarch64-linux-gnu-nm test/output/test.elf` if `src/test.s` changes.
 
 ### Other
 

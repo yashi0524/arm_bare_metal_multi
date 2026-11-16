@@ -42,6 +42,7 @@ make                                 # assembles src/test.s -> test/output/test.
 | `make run` | Foundation_Platform | no (none available) | `cpu0`'s own EL3/vector-table/SMC-handler code path only — see caveat below |
 | `make run-base` | FVP_Base_RevC-2xAEMvA | no | Full PSCI CPU_ON handshake, functional check |
 | `make run-base-debug` | FVP_Base_RevC-2xAEMvA | yes, port 7100 | Same as `run-base`, plus `-I --iris-port 7100` so a debug client (e.g. `ipython3` + `iris.debug`) can attach and watch the handshake live |
+| `make run-base-bug` | FVP_Base_RevC-2xAEMvA | yes, port 7100 | Deliberately reproduces a real boot failure (`cpu1` never comes up) for debugging practice — see [`doc/boot_fail_practice.md`](doc/boot_fail_practice.md) |
 | `make clean` | — | — | Removes `test/output/test.o`/`test.elf` |
 
 ## Expected result
@@ -97,9 +98,17 @@ Useful things to catch live:
 - A memory watchpoint (`cpu0.add_bpt_mem(<mailbox address>, on_write=True)`)
   on the mailbox — halts exactly when the entry point is published, before
   `cpu1` is even powered on.
-- `cpu1.get_pc()` before/after — frozen at whatever `cluster0.cpu1.RVBAR`
-  was set to until the handler's `PPONR` write actually powers it on; only
-  then does it start advancing.
+- `cpu1.get_pc()` before/after — **don't read the value itself as the
+  reset vector**: while `cpu1` is powered off (and even right after the
+  `PPONR` write, before `cpu1` is stepped) it reads `0x80000000` — the
+  ELF entry point — not `cluster0.cpu1.RVBAR`. Verified: once stepped
+  (`cpu1.step(count=50)`) it genuinely starts fetching from RVBAR
+  (`secondary_entry`, `0x80001000`) and lands on `secondary_loop`. The
+  real signal is whether the PC *moves* when stepped, not what it reads
+  while parked.
+- Semihosting output (`hlt #0xf000`) prints in the FVP's own terminal
+  (terminal 1), not in `ipython3` — see "Print debugging" in
+  [`doc/how_to_debug.md`](doc/how_to_debug.md).
 
 Get exact addresses via `aarch64-linux-gnu-nm test/output/test.elf`
 (e.g. `smc_handler`, `mailbox`, `secondary_task`).
