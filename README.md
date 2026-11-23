@@ -88,9 +88,28 @@ ipython3 -i script/Iris_connect.py
 ```
 
 This connects, halts both cores, and leaves `model`/`cpu0`/`cpu1` live in
-your `ipython3` session (see `script/Iris_connect.py`). For the debug
+your `ipython3` session (see `script/Iris_connect.py`). It also loads
+`script/iris_targets.py`: `run_to()`, `show_regs()`, `run_until_uart()` and
+`uart_tail()`, on the same connection. To use the UART ones, pass the FVP's
+stdout log as an argument (`ipython3 -i script/Iris_connect.py build_debug.log`,
+with `make run-base-debug > build_debug.log 2>&1`):
+
+```python
+>>> run_to("smc_handler"); show_regs()                     # PSCI CPU_ON being serviced
+>>> cpu0.step(count=1)                                     # by hand
+>>> run_to("secondary_task", cpu=cpu1, interleave=True)    # cpu1 after power-on
+>>> run_until_uart("SECONDARY CORE")
+``` For the debug
 options landscape and the full Iris API, see
 [`doc/how_to_debug.md`](doc/how_to_debug.md).
+
+Non-interactive check of `step_interleaved()` against this test (start
+from a freshly launched model; exit status 0 = PASS):
+
+```bash
+make run-base-debug > build_debug.log 2>&1 &    # FVP stdout (semihosting) -> log
+python3 script/1_iris_verify_interleaved.py build_debug.log
+```
 
 Useful things to catch live:
 - A breakpoint on `smc_handler` (`cpu0.add_bpt_prog(<address>)`) — halts

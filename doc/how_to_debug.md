@@ -13,6 +13,38 @@ What's actually available for debugging on this host, and why the raw
 - **Arm Debugger (VS Code extension)** is installed and can attach to an already-running Iris session (`connect_existing_model`), and genuinely connects with the right `--cdb-entry` config — but stops at licensing: the free Keil MDK Community license covers launching it, not obtaining a debug license for an Armv8-A/Armv9 target (Keil MDK is scoped to Cortex-M). A real Cortex-A/Armv9 session through it needs a paid Arm Development Studio-class UBL product.
 - **Net result:** the raw Python `iris.debug` client is the actually-usable free path — `../script/Iris_connect.py` gives you exactly that, ready to go.
 
+## Interactive session: `iris_targets`
+
+`../script/iris_targets.py` (ported from `../../arm_linux_multicore`) has
+"get to X" functions on top of `Iris_connect`'s connection. Running
+`ipython3 -i script/Iris_connect.py [fvp_stdout_log]` loads them for you;
+none of them disconnects or restarts the model.
+
+| Function | Does |
+|---|---|
+| `run_to(target, space=None, step=1_000_000, cpu=None, interleave=False)` | steps until `cpu` (default cpu0) reaches a `test.elf` symbol or address, using a breakpoint in `space`. `interleave=True` steps both cores (needed for cpu1 code). Returns `True` if reached |
+| `show_regs(regs=…, cpu=None)` | prints registers by name plus the bytes at PC |
+| `run_until_uart(text, chunk=1000, slice_=10)` | steps both cores interleaved until `text` appears in the FVP's stdout (only output after the call starts counts) |
+| `uart_tail(n)` / `set_uart_log(path)` | last lines of the FVP's stdout / where it's written |
+
+Verified 2026-11-23 on fresh models, in one session each:
+
+- `run_to("el1_entry")` → PC `0x80000028`, SPSR_EL3 `0x3c5`. One manual
+  `cpu0.step(1)` → `0x8000002c`, X0 = 3, the low half of the PSCI function ID being built.
+- `run_to("secondary_task", cpu=cpu1, interleave=True, step=4)` → cpu1 at
+  `0x8000100c` with X2 = `0x8000100c`, read from the mailbox by `secondary_entry`.
+- `run_until_uart("SECONDARY CORE")` → seen after +1000 instructions per
+  core; both semihosting messages were in the log.
+- **Memory spaces are per exception level.** Space IDs: `Secure Monitor` = `S`
+  (0, EL3), `Hyp` (1, EL2), `Guest` = `N` (2, EL1/EL0), `IPA` (3), plus the physical
+  ones. This test's EL1 runs in the *secure* world, but the core reports
+  `Guest`/`N` there. So from EL1, `run_to("smc_handler")` with the default space
+  was **NOT REACHED** (cpu0 ran on to `primary_loop`). With
+  `space="Secure Monitor"` it hit: X0 = `0xc4000003` (CPU_ON), X1 = `0x81000100`,
+  X2 = `0x8000100c`, ELR_EL3 = `0x80000044`. It's not symmetric, though: an
+  `el1_entry` breakpoint set at EL3 (default space) *did* fire at EL1. Why is
+  not known.
+
 ## Iris debug API cheat sheet
 
 Arm doesn't publish a consolidated Iris debug API reference — the
@@ -61,17 +93,37 @@ shell, to stop that too.
 |---|---|
 | `cpu.set_execution_state(False)` / `(True)` | halt / resume flag — **real bool**, not `"stop"`/`"run"`. **On a synchronous connection this does NOT make execution progress** — verified: PC stayed frozen for 1.5 real seconds with the flag reporting `True` the whole time. `SyncTarget` has no free-run RPC at all; only `step()` advances it |
 | `cpu.get_execution_state()` | returns bool (just the flag above, not "is it actually moving") |
-| `cpu.step(count=1, unit='instruction')` | single/multi-step — sync model only, and the *only* real way to advance a synchronous target. A large `count` works fine as a practical "run" — e.g. `cpu.step(count=100000)` drove an entire PSCI CPU_ON handshake to completion in one call in this project. **A hit breakpoint stops it early** — verified: `cpu0.step(count=1000)` with `add_bpt_prog(smc_handler)` set returned with PC exactly on `smc_handler`, so step-with-big-count + breakpoint is the GDB `continue` equivalent |
+| `cpu.step(count=1, unit='instruction')` | single/multi-step — sync model only, and the *only* real way to advance a synchronous target. **It runs only that one core; every other core stays frozen.** Verified 2026-11-23 in [`../../arm_linux_multicore`](../../arm_linux_multicore): stepping only `cpu0` from reset to Linux `/init` left `cpu1` at PC `0x0` with nothing retired. Stepping a powered-off core returns at once without executing anything, and the **next** `step()` on another core is then swallowed (returns with zero progress). A large `count` works fine as a practical "run" — e.g. `cpu.step(count=100000)` drove an entire PSCI CPU_ON handshake to completion in one call in this project. **A hit breakpoint stops it early** — verified: `cpu0.step(count=1000)` with `add_bpt_prog(smc_handler)` set returned with PC exactly on `smc_handler`, so step-with-big-count + breakpoint is the GDB `continue` equivalent |
 | `cpu.get_pc()` | current PC |
 | `cpu.get_instruction_count()` | retired-instruction counter (per-target, not cumulative from reset) |
-| `resume_all()` / `halt_all()` / `step_all()` (from `../script/Iris_connect.py`) | one call each to set/step every core at once — no bulk primitive exists in the Iris API itself; these just loop `(cpu0, cpu1)` for you. **Use `step_all()` to actually make progress** — `resume_all()` alone only sets the flag, per the caveat above |
+| `resume_all()` / `halt_all()` / `step_all()` (from `../script/Iris_connect.py`) | one call each to set/step every core — no bulk primitive exists in the Iris API itself; these just loop `(cpu0, cpu1)` for you. `step_all(n)` runs cpu0 for `n`, **then** cpu1 for `n` (sequential, not concurrent). `resume_all()` alone only sets the flag, per the caveat above |
+| `step_interleaved(count, chunk=1_000_000)` (from `../script/Iris_connect.py`) | advances every core by `count`, round-robin in `chunk`-sized slices, so the cores progress together; re-issues a step that was swallowed after stepping a powered-off core. Use it when both cores must run at once (shared-memory polling, spinlocks); verified 2026-11-23 here (below) and in `../../arm_linux_multicore` (full 2-core Linux boot) |
 
 Quick summary, since the distinction above is easy to miss:
 
 | Want to... | Use |
 |---|---|
-| Actually advance the CPU(s) | `step_all(count=100000)` |
+| Advance one core (others frozen) | `cpu.step(count=...)` |
+| Advance cores that must run together | `step_interleaved(count, chunk=1_000_000)` |
+| Advance each core in turn (independent work) | `step_all(count=100000)` |
 | Just set the running/halted flag (no forward progress) | `resume_all()` / `halt_all()` |
+
+Verified run of this project's test with `step_interleaved()` (2026-11-23,
+`make run-base-debug`, 4-instruction slices). To repeat it, run
+`../script/1_iris_verify_interleaved.py <fvp_stdout_log>` (PASS/FAIL exit status):
+
+- At reset, cpu1 is powered off at PC `0x80000000`. `cpu1.step(10)`
+  returned at once (counter +1, PC unchanged). The next `cpu0.step(3)`
+  then ran **0** instructions, and the one after it ran 3. That's the
+  swallowed step that `step_interleaved()` retries.
+- cpu0 ran `_start` → `el1_entry` → `smc_handler`. In slice 5, cpu1
+  powered on and ran `secondary_entry` → `secondary_task`
+  (`0x80000000` → `0x8000100c`) in the same slice as cpu0's `eret` back
+  to EL1. In slice 6, cpu0 reached `primary_loop` (`0x80000050`) and cpu1
+  reached `secondary_loop` (`0x80001018`).
+- After that, both cores advanced +100 for `step_interleaved(100, chunk=10)`,
+  and both semihosting messages (`PRIMARY CORE (cpu0) BOOTED…`,
+  `SECONDARY CORE (cpu1) RELEASED…`) appeared on the FVP's stdout.
 
 ### Registers
 
@@ -107,7 +159,7 @@ fails on a peripheral address, that's why.
 
 | Call | Notes |
 |---|---|
-| `cpu.add_bpt_prog(addr)` | instruction breakpoint |
+| `cpu.add_bpt_prog(addr, memory_space=None)` | instruction breakpoint. `memory_space=None` = the core's *current* space, and spaces are per exception level (see "Interactive session" above). From EL1, a breakpoint on EL3 code needs `memory_space="Secure Monitor"`. Physical spaces are rejected for code breakpoints (seen in `../../arm_linux_multicore`) |
 | `cpu.add_bpt_mem(addr, on_read=True, on_write=True)` | memory watchpoint |
 | `cpu.add_bpt_reg(name, on_read=True, on_write=True)` | register watchpoint — Arm's own docstring says "no Arm models support this as of 2013," untested here |
 | `cpu.remove_bpt(bpt.number)` | **note the `.number`** — passing the `Breakpoint` object itself raises `ValueError` |

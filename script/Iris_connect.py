@@ -3,8 +3,11 @@
 with an Iris server (e.g. `make run-base-debug`, port 7100) and expose
 cpu0/cpu1 as ready-to-use iris.debug targets, halted and waiting.
 
-Run interactively so cpu0/cpu1 stay live in your session:
-    ipython3 -i script/Iris_connect.py
+Run interactively so cpu0/cpu1 stay live in your session; this also loads
+iris_targets (run_to(), show_regs(), run_until_uart(), ...) on the same
+connection, and the optional argument is the FVP stdout log for the UART ones:
+    ipython3 -i script/Iris_connect.py [build_debug.log]
+    >>> run_to("smc_handler"); show_regs()
 
 Or import from your own script:
     from Iris_connect import model, cpu0, cpu1
@@ -14,6 +17,14 @@ instruction stepping) to exist at all — see ../README.md.
 """
 import os
 import sys
+
+# When run as `ipython3 -i script/Iris_connect.py` this file is __main__, so a
+# later `import Iris_connect` (e.g. from iris_targets) would load it AGAIN and
+# open a second Iris connection. Register this module under its own name first.
+sys.modules.setdefault("Iris_connect", sys.modules[__name__])
+# ...and make this script's folder importable (iris_targets.py lives here),
+# whatever the current directory is.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 IRIS_PYTHON_PATH = os.path.expanduser(
     "~/work/0_simulator/arm_fvp/Base_RevC_AEMvA_11.32_19/Iris/Python"
@@ -57,11 +68,47 @@ def resume_all(cpus=CPUS):
 
 
 def step_all(count=100000, unit="instruction", cpus=CPUS):
-    """Advance every core in `cpus` by `count` steps, one call each — the
-    real way to make execution progress on this synchronous connection.
-    Blocking; returns once every core has completed its steps."""
+    """Advance every core in `cpus` by `count` steps, one call each, one
+    core after the other. Blocking; returns once every core has completed
+    its steps.
+
+    NOTE: each cpu.step() runs ONLY that core — the others stay frozen
+    while it runs (verified 2026-11-23 in ../arm_linux_multicore:
+    stepping cpu0 alone from reset to Linux /init left cpu1 at PC 0x0
+    with zero instructions retired, and Linux reported "CPU1: failed to
+    come online" after its 5 s timeout).
+    So one big step_all() runs cpu0 for `count`, THEN cpu1 for `count` —
+    fine for a simple handshake, but not for code where the cores must
+    make progress together (Linux SMP bring-up). Use step_interleaved()
+    for that."""
     for cpu in cpus:
         cpu.step(count=count, unit=unit)
+
+
+def step_interleaved(count, chunk=1_000_000, unit="instruction", cpus=CPUS):
+    """Advance every core in `cpus` by `count` steps, round-robin in
+    `chunk`-sized slices, so the cores make progress together (roughly
+    lockstep, to `chunk` granularity). Needed for Linux SMP boot; useful
+    here for anything where both cores must run at once (shared-memory
+    polling, spinlocks) rather than one-after-the-other.
+
+    Powered-off cores need care (verified 2026-11-23 on cpu1 before
+    PSCI CPU_ON, both here and in ../arm_linux_multicore): cpu.step() on
+    them returns at once without executing anything (PC stays put —
+    0x80000000 here, 0x0 there; the instruction counter ticks by 1 per call),
+    BUT the next step() on another core is then swallowed — it returns
+    with zero progress. Strict alternation would leave cpu0 stuck forever,
+    so each step is re-issued once if that core's instruction count did
+    not move."""
+    done = 0
+    while done < count:
+        n = min(chunk, count - done)
+        for cpu in cpus:
+            before = cpu.get_instruction_count()
+            cpu.step(count=n, unit=unit)
+            if cpu.get_instruction_count() == before:  # swallowed step
+                cpu.step(count=n, unit=unit)
+        done += n
 
 
 def dump_mem(cpu, address, count=16, memory_space=None):
@@ -75,7 +122,17 @@ def dump_mem(cpu, address, count=16, memory_space=None):
 
 
 if __name__ == "__main__":
+    # Interactive session: also load the "get to X" helpers (run_to,
+    # show_regs, run_until_uart, uart_tail, ...). Only here, not at module
+    # level: iris_targets itself imports this module, and scripts that
+    # `import Iris_connect` don't need them.
+    from iris_targets import *  # noqa: F401,F403
+    if len(sys.argv) > 1:       # optional: the FVP stdout log, for the UART helpers
+        set_uart_log(sys.argv[1])  # noqa: F405
     halt_all()
     print(f"cpu0 PC = {hex(cpu0.get_pc())}")
     print(f"cpu1 PC = {hex(cpu1.get_pc())}")
-    print("cpu0/cpu1 halted and ready. model.release() when done.")
+    print("cpu0/cpu1 halted and ready. iris_targets loaded: run_to(), show_regs(), "
+          "run_until_uart(), uart_tail()"
+          + ("" if len(sys.argv) > 1 else "; call set_uart_log(path) for the UART ones")
+          + ". model.release() when done.")
